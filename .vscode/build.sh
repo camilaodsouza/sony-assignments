@@ -105,7 +105,7 @@ function build_sdk (){
     fi
 
     cd ${SDK_PATH}/sdk
-    make
+    make -j
 
     # Check exit status
     check_exit_status
