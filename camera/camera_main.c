@@ -5,10 +5,13 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <unistd.h>
 #include <errno.h>
 #include <nuttx/video/video.h>
 
 #include "camera_fileutil.h"
+
+#include <fcntl.h>
 
 /****************************************************************************
  * Pre-processor Definitions
@@ -76,7 +79,7 @@ static int camera_prepare(int fd, enum v4l2_buf_type type,
     0
   };
 
-    /* VIDIOC_REQBUFS initiate user pointer I/O */
+  /* VIDIOC_REQBUFS initiate user pointer I/O */
 
   req.type   = type;
   req.memory = V4L2_MEMORY_USERPTR;
@@ -266,7 +269,6 @@ int camera_main(int argc, char *argv[])
 {
   int ret;
   int v_fd;
-  int capture_num = DEFAULT_CAPTURE_NUM;
   enum v4l2_buf_type capture_type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
   struct v4l2_buffer v4l2_buf;
   const char *save_dir;
@@ -302,27 +304,32 @@ int camera_main(int argc, char *argv[])
       goto exit_this_app;
     }
 
-  // Get image from camera
-  ret = get_camimage(v_fd, &v4l2_buf, V4L2_BUF_TYPE_VIDEO_CAPTURE);
-  if (ret != OK)
+  for (int i = 0; i < 5; i++)
     {
-      goto exit_this_app;
+      // Get image from camera
+      ret = get_camimage(v_fd, &v4l2_buf, V4L2_BUF_TYPE_VIDEO_CAPTURE);
+      if (ret != OK)
+        {
+        goto exit_this_app;
+        }
+
+      // Save image to chosen storage
+      futil_writeimage(
+                      (uint8_t *)v4l2_buf.m.userptr,
+                      (size_t)v4l2_buf.bytesused,
+                      (capture_type == V4L2_BUF_TYPE_VIDEO_CAPTURE) ?
+                      "RGB" : "JPG");
+
+      // Release image to return to buffer
+      ret = release_camimage(v_fd, &v4l2_buf);
+      if (ret != OK)
+        {
+          goto exit_this_app;
+        }
+
+      sleep(1);
     }
 
-  // Save image to chosen storage
-  futil_writeimage(
-                  (uint8_t *)v4l2_buf.m.userptr,
-                  (size_t)v4l2_buf.bytesused,
-                  (capture_type == V4L2_BUF_TYPE_VIDEO_CAPTURE) ?
-                  "RGB" : "JPG");
-
-  // Release image to ...(?) - Explain better
-  ret = release_camimage(v_fd, &v4l2_buf);
-  if (ret != OK)
-    {
-      goto exit_this_app;
-    }
-  
 exit_this_app:
 
   /* Close video device file makes dequeue all buffers */
