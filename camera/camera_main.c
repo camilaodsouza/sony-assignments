@@ -12,11 +12,28 @@
 #include "camera_fileutil.h"
 
 #include <fcntl.h>
+#include <sys/boardctl.h>
+
+#include <arch/board/cxd56_imageproc.h>
 
 /****************************************************************************
  * Pre-processor Definitions
  ****************************************************************************/
 #define IMAGE_RGB_SIZE     (320*240*2) /* QVGA RGB565 */
+#define IMAGE_UYVY_SIZE     (320*240*2)
+
+#define IMAGE_WIDTH       (320)
+#define IMAGE_HEIGHT      (240)
+#define IMAGE_DATASIZE    (IMAGE_WIDTH*IMAGE_HEIGHT*2) /* QVGA YUV422 */
+
+#define IMG_WIDTH_SAMPLE_REQUIRED     (120)
+#define IMG_HEIGHT_SAMPLE_REQUIRED    (120)
+#define IMG_DATASIZE_SAMPLE_REQUIRED  \
+  (IMG_WIDTH_SAMPLE_REQUIRED*IMG_HEIGHT_SAMPLE_REQUIRED*2)
+
+#define IMG_WIDTH_RECT_CLIP      (240)
+#define IMG_HEIGHT_RECT_CLIP     (240)
+
 #define DEFAULT_CAPTURE_NUM (10)
 #define VIDEO_BUFNUM       (3)
 
@@ -25,7 +42,7 @@
  ****************************************************************************/
 struct v_buffer
 {
-  uint32_t *start;
+  uint32_t *start; // Can I just turn this into a uint8_t? I used to be uint32
   uint32_t length;
 };
 
@@ -40,9 +57,21 @@ static int camera_prepare(int fd, enum v4l2_buf_type type,
                           struct v_buffer **vbuf,
                           uint8_t buffernum, int buffersize);
 static void free_buffer(struct v_buffer  *buffers, uint8_t bufnum);
-static int get_camimage(int fd, struct v4l2_buffer *v4l2_buf,
+static unsigned char *get_camimage(int fd, struct v4l2_buffer *v4l2_buf,
     enum v4l2_buf_type buf_type);
 static int release_camimage(int fd, struct v4l2_buffer *v4l2_buf);
+
+/****************************************************************************
+ * Private Data
+ ****************************************************************************/
+static unsigned char *resized_mem;
+static unsigned char *gray_mem;
+const imageproc_rect_t clip_rect = {
+  .x1 = (IMAGE_WIDTH - IMG_WIDTH_RECT_CLIP)/2,
+  .y1 = (IMAGE_HEIGHT - IMG_HEIGHT_RECT_CLIP)/2,
+  .x2 = (IMAGE_WIDTH - IMG_WIDTH_RECT_CLIP)/2 + IMG_WIDTH_RECT_CLIP -1,
+  .y2 = (IMAGE_HEIGHT - IMG_HEIGHT_RECT_CLIP)/2 + IMG_HEIGHT_RECT_CLIP -1
+};
 
 /****************************************************************************
  * Private Functions
@@ -79,7 +108,7 @@ static int camera_prepare(int fd, enum v4l2_buf_type type,
     0
   };
 
-  /* VIDIOC_REQBUFS initiate user pointer I/O */
+    /* VIDIOC_REQBUFS initiate user pointer I/O */
 
   req.type   = type;
   req.memory = V4L2_MEMORY_USERPTR;
@@ -109,6 +138,18 @@ static int camera_prepare(int fd, enum v4l2_buf_type type,
     }
 
   /* Prepare video memory to store images */
+
+  resized_mem = (unsigned char *)memalign(32, IMG_DATASIZE_SAMPLE_REQUIRED);
+  if (!resized_mem)
+    {
+      return -1;
+    }
+
+  gray_mem = (unsigned char *)memalign(32, IMG_WIDTH_SAMPLE_REQUIRED*IMG_HEIGHT_SAMPLE_REQUIRED);
+  if (!gray_mem)
+    {
+      return -1;
+    }
 
   *vbuf = malloc(sizeof(v_buffer_t) * buffernum);
 
@@ -211,7 +252,7 @@ static void free_buffer(struct v_buffer  *buffers, uint8_t bufnum)
  * Description:
  *   DQBUF camera frame buffer from video driver with taken picture data.
  ****************************************************************************/
-static int get_camimage(int fd, struct v4l2_buffer *v4l2_buf,
+static unsigned char *get_camimage(int fd, struct v4l2_buffer *v4l2_buf,
     enum v4l2_buf_type buf_type)
 {
   int ret;
@@ -226,10 +267,10 @@ static int get_camimage(int fd, struct v4l2_buffer *v4l2_buf,
   if (ret)
     {
       printf("Fail DQBUF %d\n", errno);
-      return ERROR;
+      return NULL;
     }
 
-  return OK;
+  return (unsigned char *)v4l2_buf->m.userptr;//OK;
 }
 
 
@@ -265,10 +306,12 @@ static int release_camimage(int fd, struct v4l2_buffer *v4l2_buf)
  * Description:
  *   main routine of this example.
  ****************************************************************************/
+
 int camera_main(int argc, char *argv[])
 {
   int ret;
   int v_fd;
+  unsigned char *mem;
   enum v4l2_buf_type capture_type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
   struct v4l2_buffer v4l2_buf;
   const char *save_dir;
@@ -296,39 +339,59 @@ int camera_main(int argc, char *argv[])
 
   // Prepare for VIDEO_CAPTURE stream
   ret = camera_prepare(v_fd, V4L2_BUF_TYPE_VIDEO_CAPTURE,
-                       V4L2_BUF_MODE_RING, V4L2_PIX_FMT_RGB565,
+                       V4L2_BUF_MODE_RING, V4L2_PIX_FMT_UYVY,
                        VIDEO_HSIZE_QVGA, VIDEO_VSIZE_QVGA,
-                       &buffers_video, VIDEO_BUFNUM, IMAGE_RGB_SIZE);
+                       &buffers_video, VIDEO_BUFNUM, IMAGE_UYVY_SIZE);
   if (ret != OK)
     {
       goto exit_this_app;
     }
 
-  for (int i = 0; i < 5; i++)
+  imageproc_initialize();
+
+  // Get image from camera
+  mem = get_camimage(v_fd, &v4l2_buf, V4L2_BUF_TYPE_VIDEO_CAPTURE);
+  if (mem != NULL)
     {
-      // Get image from camera
-      ret = get_camimage(v_fd, &v4l2_buf, V4L2_BUF_TYPE_VIDEO_CAPTURE);
-      if (ret != OK)
+      if (imageproc_clip_and_resize(mem, IMAGE_WIDTH, IMAGE_HEIGHT, resized_mem,
+                                     IMG_WIDTH_SAMPLE_REQUIRED, IMG_HEIGHT_SAMPLE_REQUIRED,
+                                     16, (imageproc_rect_t *)&clip_rect) == 0)
         {
-        goto exit_this_app;
+          imageproc_convert_yuv2gray(resized_mem, gray_mem,
+              IMG_WIDTH_SAMPLE_REQUIRED, IMG_HEIGHT_SAMPLE_REQUIRED);
         }
-
-      // Save image to chosen storage
-      futil_writeimage(
-                      (uint8_t *)v4l2_buf.m.userptr,
-                      (size_t)v4l2_buf.bytesused,
-                      (capture_type == V4L2_BUF_TYPE_VIDEO_CAPTURE) ?
-                      "RGB" : "JPG");
-
-      // Release image to return to buffer
-      ret = release_camimage(v_fd, &v4l2_buf);
-      if (ret != OK)
+      else
         {
-          goto exit_this_app;
+          printf("imageproc_clic_and_resize failed.\n");
         }
-
-      sleep(1);
     }
+  else
+    {
+      printf("get_camimage failed.\n");
+      goto exit_this_app;
+    }
+
+  // Save image to chosen storage
+  imageproc_convert_yuv2rgb((uint8_t *)v4l2_buf.m.userptr, IMAGE_WIDTH, IMAGE_HEIGHT); //remove origRGB_mem
+  futil_writeimage(
+                  (uint8_t *)v4l2_buf.m.userptr,
+                  (size_t)v4l2_buf.bytesused,
+                  (capture_type == V4L2_BUF_TYPE_VIDEO_CAPTURE) ?
+                  "RGB" : "JPG");
+
+  futil_writeimage(
+                  gray_mem,
+                  IMG_WIDTH_SAMPLE_REQUIRED*IMG_HEIGHT_SAMPLE_REQUIRED,
+                  (capture_type == V4L2_BUF_TYPE_VIDEO_CAPTURE) ?
+                  "RGB" : "JPG");
+
+  // Release image to return to buffer
+  ret = release_camimage(v_fd, &v4l2_buf);
+  if (ret != OK)
+    {
+      goto exit_this_app;
+    }  
+
 
 exit_this_app:
 

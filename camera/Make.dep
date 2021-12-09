@@ -210,4 +210,6 @@ camera_main.home.EU.1000325098.Documents.myproject_leds.camera.o: \
  /home/EU/1000325098/spresense/nuttx/include/nuttx/serial/tioctl.h \
  /home/EU/1000325098/spresense/nuttx/include/nuttx/net/ioctl.h \
  /home/EU/1000325098/spresense/nuttx/include/nuttx/video/video_controls.h \
- camera_fileutil.h /home/EU/1000325098/spresense/nuttx/include/fcntl.h
+ camera_fileutil.h /home/EU/1000325098/spresense/nuttx/include/fcntl.h \
+ /home/EU/1000325098/spresense/nuttx/include/sys/boardctl.h \
+ /home/EU/1000325098/spresense/nuttx/include/arch/board/cxd56_imageproc.h
